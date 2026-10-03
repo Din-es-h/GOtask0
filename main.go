@@ -1,93 +1,118 @@
 package main
 
 import (
-    "encoding/json"
-    "net/http"
+	"context"
+	"encoding/json"
+	"log"
+	"net/http"
+	"time"
 
-    "github.com/julienschmidt/httprouter"
-    "gopkg.in/mgo.v2"
-    "gopkg.in/mgo.v2/bson"
+	"github.com/julienschmidt/httprouter"
+	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
+	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
-var session *mgo.Session
+type User struct {
+	ID   primitive.ObjectID `bson:"_id,omitempty" json:"id"`
+	Name string             `bson:"name" json:"name"`
+	Age  int                `bson:"age" json:"age"`
+}
+
+var client *mongo.Client
+var usersCollection *mongo.Collection
 
 func main() {
-    var err error
-    session, err = mgo.Dial("127.0.0.1:27018")
-    if err != nil {
-        panic(err)
-    }
-    defer session.Close()
+	clientOptions := options.Client().ApplyURI("mongodb://localhost:27017")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 
-    router := httprouter.New()
-    router.POST("/user", CreateUser)
-    router.GET("/user/:id", GetUser)
-    router.DELETE("/user/:id", DeleteUser)
+	var err error
+	client, err = mongo.Connect(ctx, clientOptions)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer client.Disconnect(ctx)
 
-    http.ListenAndServe(":8080", router)
+	err = client.Ping(ctx, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	db := client.Database("test_db")
+	usersCollection = db.Collection("users")
+
+	router := httprouter.New()
+	router.POST("/user", CreateUser)
+	router.GET("/user/:id", GetUser)
+	router.DELETE("/user/:id", DeleteUser)
+
+	http.ListenAndServe(":8080", router)
 }
-
-
-type User struct {
-    ID   bson.ObjectId `bson:"_id,omitempty" json:"id"`
-    Name string        `bson:"name" json:"name"`
-    Age  int           `bson:"age" json:"age"`
-}
-
 
 func CreateUser(w http.ResponseWriter, r *http.Request, ps httprouter.Params) {
-    var user User
-    err := json.NewDecoder(r.Body).Decode(&user)
-    if err != nil {
-        http.Error(w, err.Error(), http.StatusBadRequest)
-        return
-    }
+	var user User
+	err := json.NewDecoder(r.Body).Decode(&user)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 
-    user.ID = bson.NewObjectId()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 
-    err = session.DB("taskdb").C("users").Insert(user)
-    if err != nil {
-        http.Error(w, err.Error(), http.StatusInternalServerError)
-        return
-    }
+	result, err := usersCollection.InsertOne(ctx, user)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 
-    w.WriteHeader(http.StatusCreated)
-    json.NewEncoder(w).Encode(user)
+	user.ID = result.InsertedID.(primitive.ObjectID)
+
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(user)
 }
-
 
 func GetUser(w http.ResponseWriter, r *http.Request, ps httprouter.Params) {
-    id := ps.ByName("id")
+	id := ps.ByName("id")
 
-    if !bson.IsObjectIdHex(id) {
-        http.Error(w, "invalid id format", http.StatusBadRequest)
-        return
-    }
+	objID, err := primitive.ObjectIDFromHex(id)
+	if err != nil {
+		http.Error(w, "invalid id format", http.StatusBadRequest)
+		return
+	}
 
-    var user User
-    err := session.DB("taskdb").C("users").FindId(bson.ObjectIdHex(id)).One(&user)
-    if err != nil {
-        http.Error(w, "user not found", http.StatusNotFound)
-        return
-    }
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 
-    json.NewEncoder(w).Encode(user)
+	var user User
+	err = usersCollection.FindOne(ctx, bson.M{"_id": objID}).Decode(&user)
+	if err != nil {
+		http.Error(w, "user not found", http.StatusNotFound)
+		return
+	}
+
+	json.NewEncoder(w).Encode(user)
 }
 
-
 func DeleteUser(w http.ResponseWriter, r *http.Request, ps httprouter.Params) {
-    id := ps.ByName("id")
+	id := ps.ByName("id")
 
-    if !bson.IsObjectIdHex(id) {
-        http.Error(w, "invalid id format", http.StatusBadRequest)
-        return
-    }
+	objID, err := primitive.ObjectIDFromHex(id)
+	if err != nil {
+		http.Error(w, "invalid id format", http.StatusBadRequest)
+		return
+	}
 
-    err := session.DB("taskdb").C("users").RemoveId(bson.ObjectIdHex(id))
-    if err != nil {
-        http.Error(w, "user not found", http.StatusNotFound)
-        return
-    }
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 
-    w.WriteHeader(http.StatusNoContent)
+	result, err := usersCollection.DeleteOne(ctx, bson.M{"_id": objID})
+	if err != nil || result.DeletedCount == 0 {
+		http.Error(w, "user not found", http.StatusNotFound)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
 }
